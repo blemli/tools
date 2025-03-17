@@ -4,19 +4,48 @@
 
 ## get started
 
+### macOS & linux
+
 ``````bash
 git clone blemli/tools
+cd tools
 chmod +x install.sh && ./install.sh
 ``````
 
-(on windows instead of install.sh use install.ps1)
+or if you are lazy:
+
+```bash
+curl -L blem.li/tools_mac | sh
+```
+
+### Windows
+
+```powershell
+git clone blemli/tools
+cd tools
+./install.ps1
+```
+
+or if you are lazy:
+
+``````powershell
+irm blem.li/tools_win | iex
+``````
+
+
+
+> [!IMPORTANT]
+>
+> Get Help with `mytool --help`
+
+
 
 ## tools
 
-|                                 |                                      | macOS | Windows | Linux |
-| ------------------------------- | ------------------------------------ | ----- | ------- | ----- |
-| [purgedl](./purgedl/purgedl.py) | Alte Dateien aus Downloads entfernen | ✅     |         |       |
-| [yutub](./yutub/yutub.py)       | youtube Video als .mp3 herunterladen | ✅     |         |       |
-| svg2scalable                    |                                      |       |         |       |
-| Ghloc                           |                                      |       |         |       |
+|                  |                                                     | usage                 | macOS | Windows | Linux |
+| ---------------- | --------------------------------------------------- | --------------------- | ----- | ------- | ----- |
+| **purgedl**      | remove old files in ~/Downloads                     | `purgedl`             | ✅     |         |       |
+| **yutub**        | dowload youtube as .mp3                             | `yutub [URL]`         | ✅     |         |       |
+| **svg2scalable** | make svg files scalable                             | `svg2scalable` [PATH] | ✅     |         |       |
+| **ghloc**        | write the LOC of this project to its gh description | `ghloc`               | ✅     |         |       |
 
