@@ -88,11 +88,6 @@ def show_info():
 @click.option('--info', is_flag=True, default=False, help='Show the path and the age of the manuf file')
 def mac2vendor(mac,update=False,no_update=False,version=False):
     """Return vendor for given MAC address or prefix."""
-    if not mac and not sys.stdin.isatty():
-        mac = sys.stdin.read().strip()
-    if not mac:
-        click.echo("MAC address required either as argument or via pipe.", err=True)
-        sys.exit(1)
     input_mac = normalize(mac)
     if update or is_file_old(MANUF_FILE, MAX_AGE_DAYS):
         download_file(MANUF_URL, MANUF_FILE)
