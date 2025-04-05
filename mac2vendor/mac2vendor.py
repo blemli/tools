@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os,sys,time
 import urllib.request,gzip,click
+from tqdm import tqdm
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -12,10 +13,23 @@ MANUF_URL = "https://www.wireshark.org/download/automated/data/manuf.gz"
 # ====================================
 
 MANUF_FILE = os.path.join(MANUF_DIR, "manuf.gz")
+QUIET = False
 
+def echo(msg):
+    if not QUIET:
+        click.echo(msg)
+        
+        
 def download_file(url, filename):
-    click.echo("Downloading updated manuf file...")
-    urllib.request.urlretrieve(url, filename)
+    echo(f"Downloading updated manuf file from {url} ...")
+    echo(f"Saving to {filename} ...")
+    with tqdm(unit='B', unit_scale=True, unit_divisor=1024, miniters=1, desc=filename, disable=QUIET) as bar:
+        def reporthook(block_num, block_size, total_size):
+            if total_size > 0:
+                bar.total = total_size
+            bar.update(block_size)
+        urllib.request.urlretrieve(url, filename, reporthook)
+
 
 def is_file_old(filename, days=MAX_AGE_DAYS):
     if not os.path.exists(filename):
@@ -64,7 +78,7 @@ def show_info():
     if os.path.exists(MANUF_FILE):
         age_seconds = time.time() - os.path.getmtime(MANUF_FILE)
         age_days = age_seconds / (24 * 3600)
-        click.echo(f"Manuf file: {MANUF_FILE}\nAge: {age_days:.2f} days")
+        echo(f"Manuf file: {MANUF_FILE}\nAge: {age_days:.2f} days")
         vendors = set()
         with gzip.open(MANUF_FILE, "rt", encoding="utf-8", errors="ignore") as f:
             for line in f:
@@ -75,9 +89,9 @@ def show_info():
                     continue
                 vendor = parts[2] if len(parts) > 2 else parts[1]
                 vendors.add(vendor)
-        click.echo(f"Unique vendors: {len(vendors)}")
+        echo(f"Unique vendors: {len(vendors)}")
     else:
-        click.echo(f"Manuf file: {MANUF_FILE} does not exist. Run the script once with a mac address to download it.")
+        echo(f"Manuf file: {MANUF_FILE} does not exist. Run the script once with a mac address to download it.")
     
 
 
@@ -86,13 +100,17 @@ def show_info():
 @click.option('--update', is_flag=True, default=False, help=f'Update the manuf file manually before lookup. Default: Automatically If older than {MAX_AGE_DAYS} days')
 @click.option('--no-update', is_flag=True, default=False, help='Do not update the manuf file before lookup')
 @click.option('--info', is_flag=True, default=False, help='Show the path and the age of the manuf file')
-def mac2vendor(mac,update=False,no_update=False,version=False):
+@click.option('--quiet', is_flag=True, default=False, help='Don\'t output anything except the vendor name')
+def mac2vendor(mac,update=False,no_update=False,info=False,quiet=False):
     """Return vendor for given MAC address or prefix."""
-    input_mac = normalize(mac)
+    global QUIET
+    QUIET = quiet
+    normalized_mac = normalize(mac)
     if update or is_file_old(MANUF_FILE, MAX_AGE_DAYS):
         download_file(MANUF_URL, MANUF_FILE)
-    vendor = lookup_vendor(input_mac)
-    click.echo(vendor if vendor else "Unknown vendor")
+    vendor=lookup_vendor(normalized_mac)
+    print(vendor) if vendor else print("Unknown vendor")
+    return vendor
 
 if __name__ == "__main__":
      # Append piped input to sys.argv if not running interactively
