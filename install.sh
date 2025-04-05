@@ -28,11 +28,16 @@ for TOOL in $(ls -d */ | grep -v _shims); do
     echo "$INTERPRETER_PATH $(pwd)/$TOOL/$TOOL.py \$@" >> _shims/$TOOL
     
     # TODO: Add tab completion support:
-    echo "eval \"\$($TOOL=source_zsh $TOOL)\"" >> ~/.zshrc
+    # echo "eval \"\$($TOOL=source_zsh $TOOL)\"" >> ~/.zshrc
 done
 
-# Append the _shims directory to PATH in ~/.zshrc
-echo export PATH="\"\$PATH:$(pwd)/_shims\"" >> ~/.zshrc
+# Add _shims to system PATH using /etc/paths.d (macOS standard method)
+SHIMS_PATH="$(pwd)/_shims"
+PATHS_FILE="_shims"
+
+echo "Adding _shims directory to system PATH using /etc/paths.d..."
+echo "$SHIMS_PATH" | sudo tee /etc/paths.d/$PATHS_FILE > /dev/null
+echo "Path added to /etc/paths.d/$PATHS_FILE"
 
 # Remove shims for tools that no longer exist
 for SHIM in _shims/*; do
@@ -42,3 +47,6 @@ for SHIM in _shims/*; do
         rm "$SHIM"
     fi
 done
+
+# Inform the user that they need to restart their terminal or source their profile
+echo "PATH update complete. Please restart your terminal or run 'source /etc/profile' to apply changes."
