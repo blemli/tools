@@ -1,35 +1,38 @@
 #!/usr/bin/env python3
-import os,sys,time
-import urllib.request,gzip,click
+import os, sys, time, urllib.request, gzip, click
 from tqdm import tqdm
-
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ========== CONFIGURATION ==========
-MANUF_DIR=SCRIPT_DIR #you can adjust this to your needs
+MANUF_DIR = SCRIPT_DIR  # adjust as needed
 MAX_AGE_DAYS = 30
 MANUF_URL = "https://www.wireshark.org/download/automated/data/manuf.gz"
 # ====================================
 
-MANUF_FILE = os.path.join(MANUF_DIR, "manuf.gz")
+MANUF_FILE = os.path.join(MANUF_DIR, "manuf")
 QUIET = False
 
 def echo(msg):
     if not QUIET:
         click.echo(msg)
-        
-        
+
 def download_file(url, filename):
-    echo(f"Downloading updated manuf file from {url} ...")
-    echo(f"Saving to {filename} ...")
-    with tqdm(unit='B', unit_scale=True, unit_divisor=1024, miniters=1, desc=filename, disable=QUIET) as bar:
+    gz_filename = filename + ".gz"
+    echo(f"Downloading manuf file from {url} ...")
+    echo(f"Saving as {gz_filename} ...")
+    with tqdm(unit='B', unit_scale=True, unit_divisor=1024, miniters=1,
+              desc=gz_filename, disable=QUIET) as bar:
         def reporthook(block_num, block_size, total_size):
             if total_size > 0:
                 bar.total = total_size
             bar.update(block_size)
-        urllib.request.urlretrieve(url, filename, reporthook)
-
+        urllib.request.urlretrieve(url, gz_filename, reporthook)
+    echo("Decompressing file ...")
+    with gzip.open(gz_filename, "rb") as f_in:
+        with open(filename, "wb") as f_out:
+            f_out.write(f_in.read())
+    os.remove(gz_filename)
 
 def is_file_old(filename, days=MAX_AGE_DAYS):
     if not os.path.exists(filename):
@@ -40,10 +43,14 @@ def is_file_old(filename, days=MAX_AGE_DAYS):
 def normalize(s):
     return ''.join(c for c in s if c.isalnum()).upper()
 
-def lookup_vendor(normalized_mac):
-    best_vendor = None
-    best_prefix_len = 0
-    with gzip.open(MANUF_FILE, "rt", encoding="utf-8", errors="ignore") as f:
+def get_vendors():
+    """
+    Parse the manuf file and return a dictionary.
+    Key: normalized prefix.
+    Value: tuple(prefix_length, vendor)
+    """
+    vendors = {}
+    with open(MANUF_FILE, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
             if line.startswith("#") or not line.strip():
                 continue
@@ -59,61 +66,57 @@ def lookup_vendor(normalized_mac):
                 except ValueError:
                     continue
                 normalized_prefix = normalize(hex_part)
-                # each hex digit represents 4 bits
                 hex_digits = prefix_bits // 4
-                if normalized_mac[:hex_digits] == normalized_prefix[:hex_digits]:
-                    if hex_digits > best_prefix_len:
-                        best_vendor = vendor
-                        best_prefix_len = hex_digits
+                key = normalized_prefix[:hex_digits]
+                vendors[key] = (hex_digits, vendor)
             else:
                 normalized_prefix = normalize(prefix_field)
                 prefix_length = len(normalized_prefix)
-                if normalized_mac.startswith(normalized_prefix) and prefix_length > best_prefix_len:
-                    best_vendor = vendor
-                    best_prefix_len = prefix_length
-    return best_vendor
+                key = normalized_prefix
+                vendors[key] = (prefix_length, vendor)
+    return vendors
 
+def lookup_vendor(normalized_mac, vendors):
+    best_vendor = None
+    best_prefix_len = 0
+    for prefix, (length, vendor) in vendors.items():
+        if normalized_mac.startswith(prefix) and length > best_prefix_len:
+            best_vendor = vendor
+            best_prefix_len = length
+    return best_vendor
 
 def show_info():
     if os.path.exists(MANUF_FILE):
         age_seconds = time.time() - os.path.getmtime(MANUF_FILE)
         age_days = age_seconds / (24 * 3600)
         echo(f"Manuf file: {MANUF_FILE}\nAge: {age_days:.2f} days")
-        vendors = set()
-        with gzip.open(MANUF_FILE, "rt", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                if line.startswith("#") or not line.strip():
-                    continue
-                parts = line.strip().split(maxsplit=2)
-                if len(parts) < 2:
-                    continue
-                vendor = parts[2] if len(parts) > 2 else parts[1]
-                vendors.add(vendor)
-        echo(f"Unique vendors: {len(vendors)}")
+        unique_vendors = set(get_vendors().values())
+        echo(f"Unique vendors: {len(unique_vendors)}")
     else:
-        echo(f"Manuf file: {MANUF_FILE} does not exist. Run the script once with a mac address to download it.")
-    
-
+        echo(f"Manuf file: {MANUF_FILE} does not exist. Run the script with a MAC address to download it.")
 
 @click.command()
 @click.argument('mac')
-@click.option('--update', is_flag=True, default=False, help=f'Update the manuf file manually before lookup. Default: Automatically If older than {MAX_AGE_DAYS} days')
-@click.option('--no-update', is_flag=True, default=False, help='Do not update the manuf file before lookup')
-@click.option('--info', is_flag=True, default=False, help='Show the path and the age of the manuf file')
-@click.option('--quiet', is_flag=True, default=False, help='Don\'t output anything except the vendor name')
-def mac2vendor(mac,update=False,no_update=False,info=False,quiet=False):
-    """Return vendor for given MAC address or prefix."""
+@click.option('--update', is_flag=True, default=False,
+              help=f"Manually update manuf file if older than {MAX_AGE_DAYS} days")
+@click.option('--no-update', is_flag=True, default=False,
+              help="Do not update the manuf file before lookup")
+@click.option('--info', is_flag=True, default=False,
+              help="Show the path and age of the manuf file")
+@click.option('--quiet', is_flag=True, default=False,
+              help="Output only the vendor name")
+def mac2vendor(mac, update=False, no_update=False, info=False, quiet=False):
     global QUIET
     QUIET = quiet
     normalized_mac = normalize(mac)
     if update or is_file_old(MANUF_FILE, MAX_AGE_DAYS):
         download_file(MANUF_URL, MANUF_FILE)
-    vendor=lookup_vendor(normalized_mac)
-    print(vendor) if vendor else print("Unknown vendor")
+    vendors = get_vendors()
+    vendor = lookup_vendor(normalized_mac, vendors)
+    print(vendor if vendor else "Unknown vendor")
     return vendor
 
 if __name__ == "__main__":
-     # Append piped input to sys.argv if not running interactively
     if not sys.stdin.isatty():
         piped = sys.stdin.read().strip()
         if piped:
