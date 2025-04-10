@@ -9,15 +9,25 @@ from concurrent.futures import ThreadPoolExecutor
 @click.argument("location", default=".")
 @click.option("--behind", is_flag=True, help="Check if the repo is behind the upstream")
 def dirtygit(location=".", behind=False):
-    dirs = [d for d in os.scandir(os.path.expanduser(location)) if os.path.isdir(d.path)] #todo: recurse but only if not already a git folder
-    repos = [d for d in dirs if os.path.exists(os.path.join(d.path, ".git"))]
+    repos = []
+    def scan_dirs(path):
+        if os.path.exists(os.path.join(path, ".git")):
+            repos.append(path)
+            return
+        try:
+            for entry in os.scandir(path):
+                if entry.is_dir():
+                    scan_dirs(entry.path)
+        except (PermissionError, OSError):
+            pass
+    scan_dirs(os.path.expanduser(location))
     def check_repo(repo):
-        is_dirty = shell(f"git -C {repo.path} status --porcelain").output()
-        is_ahead = shell(f"git -C {repo.path} log --oneline @{{u}}..HEAD").output()
+        is_dirty = shell(f"git -C {repo} status --porcelain").output()
+        is_ahead = shell(f"git -C {repo} log --oneline @{{u}}..HEAD").output()
         is_behind = False
         if behind:
-            shell(f"git -C {repo.path} fetch")
-            is_behind = shell(f"git -C {repo.path} log --oneline HEAD..@{{u}}").output()
+            shell(f"git -C {repo} fetch")
+            is_behind = shell(f"git -C {repo} log --oneline HEAD..@{{u}}").output()
         if is_dirty or is_ahead or is_behind:
             return repo
         return None
@@ -25,7 +35,7 @@ def dirtygit(location=".", behind=False):
         results = list(tqdm(executor.map(check_repo, repos), total=len(repos)))
     dirty_repos = [repo for repo in results if repo]
     for repo in dirty_repos:
-        print(repo.name)
+        print(repo)
     return dirty_repos
 
 if __name__ == "__main__":
