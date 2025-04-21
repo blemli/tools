@@ -129,7 +129,8 @@
         {
             "book": "Psalms",
             "aliases": [
-                "PSA"
+                "PSA",
+                "Psalm"
             ],
             "chapters": 150
         },
