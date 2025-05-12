@@ -1,16 +1,35 @@
-#!/usr/bin/env python
-
 #!/usr/bin/env python3
 
 import os
 import json
 import re
 import requests
+import requests_cache
+from datetime import datetime, timedelta, time
 from bs4 import BeautifulSoup
 import click
 from rich.console import Console
 from rich.panel import Panel
 import locale
+
+
+# Configure requests_cache to expire at midnight
+def get_seconds_until_midnight():
+    now = datetime.now()
+    tomorrow = now.date() + timedelta(days=1)
+    midnight = datetime.combine(tomorrow, time())
+    return (midnight - now).total_seconds()
+
+# Initialize the cache with expiration at midnight
+requests_cache.install_cache(
+    cache_name=os.path.join(os.path.dirname(os.path.abspath(__file__)), '.verse_cache'),
+    backend='sqlite',
+    expire_after=get_seconds_until_midnight()
+)
+
+def is_response_from_cache(response):
+    """Check if a response came from the cache."""
+    return hasattr(response, 'from_cache') and response.from_cache
 
 
 DEBUG = False
@@ -56,6 +75,10 @@ def get_votd(lang: str):
     debug_log(f"Fetching VOTD from: {url}")
     try:
         response = requests.get(url)
+        if is_response_from_cache(response):
+            debug_log("VOTD retrieved from cache")
+        else:
+            debug_log("VOTD fetched from network (will be cached)")
         response.raise_for_status()
     except requests.RequestException as e:
         click.echo(f"Error for language '{lang}': {e}", err=True)
@@ -177,6 +200,10 @@ def get_verse(book: str, chapter: str, verses: str, version: str):
 
     try:
         response = requests.get(url)
+        if is_response_from_cache(response):
+            debug_log("Verse retrieved from cache")
+        else:
+            debug_log("Verse fetched from network (will be cached)")
         response.raise_for_status()
         html = response.text
     except requests.RequestException as e:
@@ -249,10 +276,16 @@ def get_verse(book: str, chapter: str, verses: str, version: str):
 @click.option("--json", "json_output", is_flag=True, default=False, help="Output JSON")
 @click.option("--pretty", is_flag=True, default=True, help="Pretty output (default)")
 @click.option("-v", "--verbose", is_flag=True, default=False, help="Verbose debug output")
-def main(positional, book, chapter, verse, from_verse, to_verse, version, language, json_output, pretty, verbose):
+@click.option("--clear-cache", is_flag=True, default=False, help="Clear the request cache before running")
+def main(positional, book, chapter, verse, from_verse, to_verse, version, language, json_output, pretty, verbose, clear_cache):
     global DEBUG
     DEBUG = verbose
     debug_log("Starting script...")
+
+    if clear_cache:
+        debug_log("Clearing request cache...")
+        requests_cache.clear()
+        debug_log("Cache cleared.")
 
     defaults = load_defaults()
     translations = load_translations()
@@ -331,7 +364,7 @@ def main(positional, book, chapter, verse, from_verse, to_verse, version, langua
 
     panel_title = translations.get(language.lower(), "Verse")
     if json_output:
-        click.echo(json.dumps(result, indent=2))
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
     else:
         console = Console()
         if "verses" in result:
