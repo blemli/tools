@@ -44,12 +44,13 @@ irm blem.li/tools_win | iex
 
 |                  |                                                           | usage                       | mac  | win  | linux |
 | ---------------- | --------------------------------------------------------- | --------------------------- | ---- | ---- | ----- |
-| **purgedl**    | remove files  older than 7 days from ~/Downloads          | `purgedl`                   | ✅   |      |       |
+| **purgedl**    | remove files  older than 7 days from download folder | `purgedl`                   | ✅   |      |       |
 | **yutub**        | dowload youtube video as .mp3                             | `yutub [URL]`               | ✅   |      |       |
 | **svg2scalable** | make svg files scalable                                   | `svg2scalable [PATH]`       | ✅   |      |       |
 | **ghloc**        | write the LOC of this project to its gh description       | `ghloc`                     | ✅   |      |       |
 | **mac2vendor**   | return the vendor of a MAC address                        | `mac2vendor [MAC]`          | ✅   |      |       |
-| **csv2json**     | convert CSV files to JSON with customizable options       | `csv2json [INPUT] [OUTPUT]` | ✅   |      |       |
+| **csv2json**     | convert CSV files to JSON       | `csv2json [INPUT] [OUTPUT]` | ✅   |      |       |
 | **verse**        | retrieve bible verses                                     | `verse [VERSE]`             | ✅   |      |       |
 | **dirtygit**     | show git repositories with uncommited or unpushed changes | `dirtygit`                  | ✅   |      |       |
+| **vcf2img** | extract the image from a contact | `vcf2img [INPUT] [OUTPUT]` | ✅ | | |
 
