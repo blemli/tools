@@ -197,6 +197,9 @@ def get_verse(book: str, chapter: str, verses: str, version: str):
     else:
         url = f"{baseURL}/{version_id}/{book_entry['aliases'][0]}.{chapter}.{verses}"
     debug_log(f"Fetching verse from: {url}")
+    
+    if url=="https://www.bible.com/bible/73/PSA.19.1":
+        url = "https://www.bible.com/bible/73/PSA.19.2" #dirty hack because of a bug in the bible.com site
 
     try:
         response = requests.get(url)
