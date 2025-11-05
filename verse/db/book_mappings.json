@@ -20,6 +20,7 @@
         "hiob": "Job",
         "psalmen": "Psalms",
         "sprueche": "Proverbs",
+        "sprüche": "Proverbs",
         "prediger": "Ecclesiastes",
         "hohelied": "Song of Songs",
         "jesaja": "Isaiah",
@@ -70,4 +71,4 @@
         "judas": "Jude",
         "offenbarung": "Revelation"
     }
-} 
+}
