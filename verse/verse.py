@@ -11,6 +11,8 @@ import click
 from rich.console import Console
 from rich.panel import Panel
 import locale
+import webbrowser
+import tempfile
 
 
 # Configure requests_cache to expire at midnight
@@ -280,7 +282,8 @@ def get_verse(book: str, chapter: str, verses: str, version: str):
 @click.option("--pretty", is_flag=True, default=True, help="Pretty output (default)")
 @click.option("-v", "--verbose", is_flag=True, default=False, help="Verbose debug output")
 @click.option("--clear-cache", is_flag=True, default=False, help="Clear the request cache before running")
-def main(positional, book, chapter, verse, from_verse, to_verse, version, language, json_output, pretty, verbose, clear_cache):
+@click.option("--web", is_flag=True, default=False, help="Show verse in the browser")
+def main(positional, book, chapter, verse, from_verse, to_verse, version, language, json_output, pretty, verbose, clear_cache, web):
     global DEBUG
     DEBUG = verbose
     debug_log("Starting script...")
@@ -368,6 +371,25 @@ def main(positional, book, chapter, verse, from_verse, to_verse, version, langua
     panel_title = translations.get(language.lower(), "Verse")
     if json_output:
         click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+    elif web:
+        # Open verse on bible.com in browser
+        if not positional and not book:
+            # VOTD mode: open verse-of-the-day page for language
+            url = f"https://www.bible.com/{language}/verse-of-the-day"
+        else:
+            # Verse mode: construct URL and open
+            if not book_name:
+                click.echo("Book name is required for --web option.", err=True)
+                return
+            if not chapter:
+                click.echo("Chapter number is required for --web option.", err=True)
+                return
+            verse_param = verse if verse else "-1"
+            url = get_verse_url(book_name, chapter, verse_param, version)
+            if not url:
+                click.echo("Could not construct URL for the verse.", err=True)
+                return
+        webbrowser.open(url)
     else:
         console = Console()
         if "verses" in result:
