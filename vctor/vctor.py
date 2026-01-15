@@ -8,8 +8,8 @@ from pathlib import Path
 def process_file(file, output, threshold, gigicon, force):
     """Process a single file. Returns output path on success, None on failure."""
     path = Path(file)
-    if path.suffix.lower() not in ('.jpg', '.jpeg'):
-        return None, f"Skipping {file}: not a JPG/JPEG"
+    if path.suffix.lower() not in ('.jpg', '.jpeg', '.png'):
+        return None, f"Skipping {file}: not a JPG/JPEG/PNG"
 
     out_path = Path(output) / (path.stem + '.svg') if output else path.with_suffix('.svg')
 
@@ -42,7 +42,7 @@ def process_file(file, output, threshold, gigicon, force):
 @click.option('--force', '-f', is_flag=True, help='Overwrite existing SVGs')
 @click.option('--preview', '-p', is_flag=True, help='Preview result with ql (single file only)')
 def vctor(files, output, threshold, gigicon, force, preview):
-    """Convert JPG/JPEG images to SVG using potrace."""
+    """Convert JPG/JPEG/PNG images to SVG using potrace."""
     with ThreadPoolExecutor() as pool:
         results = pool.map(lambda f: process_file(f, output, threshold, gigicon, force), files)
     processed = []
