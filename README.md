@@ -53,4 +53,5 @@ irm blem.li/tools_win | iex
 | **verse**        | retrieve bible verses                                     | `verse [VERSE]`             | ✅   |      |       |
 | **dirtygit**     | show git repositories with uncommited or unpushed changes | `dirtygit`                  | ✅   |      |       |
 | **vcf2img** | extract the image from a contact | `vcf2img [INPUT] [OUTPUT]` | ✅ | | |
+| **drivefind**    | detect a newly plugged-in drive and print its mount point (or device path with `--dev`) | `drivefind [--dev]`         | ✅   |      |       |
 
