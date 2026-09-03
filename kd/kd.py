@@ -371,7 +371,9 @@ def open_cmd(dest_opt, dest_arg):
         if not root:
             click.echo("Not in a git repo")
             sys.exit(1)
-        url = f"https://{root.name}.test"
+        # bare-deploy.yml kamal project: no destination means deploy.yml itself
+        host = (load_yaml(root / "config" / "deploy.yml").get("proxy") or {}).get("host")
+        url = f"https://{host}" if host else f"https://{root.name}.test"
     elif dest == "local":
         root = git_root()
         port = app_port(root) if root else DEFAULT_LOCAL_PORT
