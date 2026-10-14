@@ -34,6 +34,44 @@ def is_response_from_cache(response):
     """Check if a response came from the cache."""
     return hasattr(response, 'from_cache') and response.from_cache
 
+# bible.com's edge (fastly) answers bare user agents like "Mozilla/5.0" with a javascript "client challenge" page: look like a browser
+HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36",
+           "Accept-Language": "de,en;q=0.8"}
+API = "https://nodejs.bible.com/api"  # youversion's json api behind the web app: ~1KB answers instead of 360KB pages to scrape
+
+def forget(url):
+    """drop a cached response that turned out to be unusable, so the next run fetches again instead of failing until midnight"""
+    try:
+        requests_cache.get_cache().delete(urls=[url])
+    except Exception as e:
+        debug_log(f"Could not drop {url} from the cache: {e}")
+
+def api(path, **params):
+    """json from the youversion api, e.g. api("bible/verse", id=157, reference="PSA.46.11").
+    raises on network/http errors and LookupError on api errors ({"errors": [{"key": "bible.reference.not_found"}]})"""
+    url = f"{API}/{path}/3.1?" + "&".join(f"{k}={v}" for k, v in params.items())
+    response = requests.get(url, headers=HEADERS, timeout=30)
+    debug_log(f"API {url}: {'from cache' if is_response_from_cache(response) else 'from network'}, {response.status_code}")
+    try:
+        response.raise_for_status()
+        data = response.json()
+    except Exception:
+        forget(url)
+        raise
+    if isinstance(data, dict) and data.get("errors"):
+        raise LookupError(data["errors"][0].get("key", "api error"))
+    return data
+
+def api_verse(version_id, usfm):
+    """(human reference, text) of one verse, e.g. ('Psalmen 46:11', '»Seid still und erkennt, dass ich Gott bin; ...«')"""
+    d = api("bible/verse", id=version_id, reference=usfm)
+    return d["reference"]["human"], " ".join(d["content"].split())
+
+def api_chapter(version_id, book_entry, chapter):
+    """{'title', 'verses': {num: text}, 'citation'} of a whole chapter (same markup as the web page, parsed the same way)"""
+    d = api("bible/chapter", id=version_id, reference=f"{book_entry['aliases'][0]}.{chapter}", format="html")
+    return parse_chapter_markup(BeautifulSoup(d["content"], "html.parser"), book_entry, chapter)
+
 
 DEBUG = False
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -188,11 +226,36 @@ def resolve_book(book: str):
     candidates = ", ".join(entry["book"] for entry in matches)
     return None, f"Book '{book}' is ambiguous: {candidates}."
 
-def get_votd(lang: str):
+def get_votd(lang: str, version: str = None):
+    """verse of the day: youversion's day list (day of year -> usfm, english numbering) + the verse api in `version`.
+    falls back to scraping the verse-of-the-day page (site default version) when the api fails."""
+    if version:
+        try:
+            data = api("moments/votd", day=1)  # the whole year
+            def find(o):
+                if isinstance(o, dict):
+                    if "votd" in o:
+                        return o["votd"]
+                    for v in o.values():
+                        r = find(v)
+                        if r:
+                            return r
+            usfm = {e["day"]: e["usfm"] for e in find(data)}[datetime.now().timetuple().tm_yday]
+            book, chapter = usfm[0].split(".")[:2]
+            numbers = [shift_verse(book, chapter, u.split(".")[2], version) for u in usfm]
+            parts = [api_verse(resolve_version_id(version), f"{book}.{chapter}.{n}") for n in numbers]
+            citation = parts[0][0] + (f"-{numbers[-1]}" if len(parts) > 1 else "")
+            debug_log(f"VOTD via api: {citation} ({version})")
+            return {"citation": citation, "passage": " ".join(t for _, t in parts), "images": [], "version": version.upper(), "usfm": usfm}
+        except Exception as e:
+            debug_log(f"VOTD api failed ({e}), falling back to the verse-of-the-day page")
+    return get_votd_html(lang)
+
+def get_votd_html(lang: str):
     url = f"https://www.bible.com/{lang.strip()}/verse-of-the-day"
     debug_log(f"Fetching VOTD from: {url}")
     try:
-        response = requests.get(url)
+        response = requests.get(url, headers=HEADERS, timeout=60)
         if is_response_from_cache(response):
             debug_log("VOTD retrieved from cache")
         else:
@@ -245,6 +308,7 @@ def get_votd(lang: str):
             "images": images,
             "version": version
         }
+    forget(url)
     return None
 
 def parse_chapter_markup(soup, book_entry, chapter):
@@ -253,8 +317,8 @@ def parse_chapter_markup(soup, book_entry, chapter):
     Verse fragments are <span data-usfm="ISA.55.1"> elements whose CSS-module
     class names are hashed, so children are matched by class suffix
     (…__label = verse number, …__note = footnotes, …__heading = section title)."""
-    def has_class_suffix(el, suffix):
-        return any(c.endswith(suffix) for c in (el.get("class") or []))
+    def has_class_suffix(el, suffix):  # web page: hashed css-module names ("ChapterContent_verse__57FIw"), api html: plain ("verse")
+        return any(c == suffix.lstrip("_") or c.endswith(suffix) for c in (el.get("class") or []))
 
     # page chrome (chapter picker etc.) reuses the same class suffixes,
     # so only look inside the bible text container
@@ -281,7 +345,8 @@ def parse_chapter_markup(soup, book_entry, chapter):
     if not fragments:
         return None
 
-    verses_dict = {num: " ".join(parts) for num, parts in sorted(fragments.items())}
+    # fragments are joined with spaces, also where a footnote sat right before a comma -> "zerbricht , den"
+    verses_dict = {num: re.sub(r"\s+([,;.:!?«)])", r"\1", " ".join(parts)) for num, parts in sorted(fragments.items())}
     # ignore the chapter label ("Kapitel 55"), whose heading sits in a __cl container
     heading = root.find(lambda el: el.name == "span" and has_class_suffix(el, "__heading")
                         and not (el.parent and has_class_suffix(el.parent, "__cl")))
@@ -292,6 +357,8 @@ def parse_chapter_markup(soup, book_entry, chapter):
     }
 
 def get_verse(book: str, chapter: str, verses: str, version: str):
+    """{'citation', 'passage'} for a verse or range ("10-11"), {'title', 'verses', 'citation'} for a chapter (verses == "-1"),
+    {'code', 'message'} for a bad reference, None when nothing usable came back"""
     version_id = resolve_version_id(version)
     debug_log(f"Using Bible version '{version}' resolved to id: {version_id}")
 
@@ -302,7 +369,37 @@ def get_verse(book: str, chapter: str, verses: str, version: str):
             "code": 400,
             "message": book_error
         }
+    try:
+        result = get_verse_api(book_entry, chapter, verses, version_id)
+        if result:
+            return result
+    except LookupError as e:
+        debug_log(f"API: {e}")
+        if "not_found" in str(e):
+            return {"code": 400, "message": "Verse not found"}
+    except Exception as e:
+        debug_log(f"API failed ({e}), falling back to the web page")
+    return get_verse_html(book_entry, chapter, verses, version_id)
 
+def get_verse_api(book_entry, chapter, verses, version_id):
+    code = book_entry["aliases"][0]
+    if verses == "-1":
+        return api_chapter(version_id, book_entry, chapter)
+    m = re.match(r"^(\d+)(?:-(\d+))?$", str(verses))
+    if not m:
+        return None
+    first, last = int(m.group(1)), int(m.group(2) or m.group(1))
+    if first == last:
+        human, text = api_verse(version_id, f"{code}.{chapter}.{first}")
+        return {"citation": human, "passage": text}
+    chapter_result = api_chapter(version_id, book_entry, chapter)
+    texts = [chapter_result["verses"][n] for n in range(first, last + 1) if chapter_result and n in chapter_result["verses"]]
+    if not texts:
+        return None
+    return {"citation": f"{book_entry['book']} {chapter}:{verses}", "passage": " ".join(texts)}
+
+def get_verse_html(book_entry, chapter, verses, version_id):
+    """scrape www.bible.com (360KB per page, markup changes now and then): the fallback when the api is unavailable"""
     baseURL = "https://www.bible.com/bible"
     if verses == "-1":
         url = f"{baseURL}/{version_id}/{book_entry['aliases'][0]}.{chapter}"
@@ -314,7 +411,7 @@ def get_verse(book: str, chapter: str, verses: str, version: str):
         url = "https://www.bible.com/bible/73/PSA.19.2" #dirty hack because of a bug in the bible.com site
 
     try:
-        response = requests.get(url)
+        response = requests.get(url, headers=HEADERS, timeout=60)
         if is_response_from_cache(response):
             debug_log("Verse retrieved from cache")
         else:
@@ -369,18 +466,26 @@ def get_verse(book: str, chapter: str, verses: str, version: str):
                     "citation": reference,
                     "passage": verse_text,
                 }
+    chapter_result = parse_chapter_markup(soup, book_entry, chapter)  # single-verse pages carry the whole chapter too
     if verses == "-1":
-        chapter_result = parse_chapter_markup(soup, book_entry, chapter)
         if chapter_result:
             return chapter_result
-    verses_elements = soup.select(".text-17")
-    if verses_elements:
-        verse_text = verses_elements[0].get_text(" ", strip=True)
-        citation = f"{book_entry['book']} {chapter}:{verses}"
-        return {
-            "citation": citation,
-            "passage": verse_text
-        }
+    else:
+        m = re.match(r"^(\d+)(?:-(\d+))?$", str(verses))
+        if chapter_result and m:
+            first, last = int(m.group(1)), int(m.group(2) or m.group(1))
+            texts = [chapter_result["verses"][n] for n in range(first, last + 1) if n in chapter_result["verses"]]
+            if texts:
+                return {"citation": f"{book_entry['book']} {chapter}:{verses}", "passage": " ".join(texts)}
+        verses_elements = soup.select(".text-17")  # pre-2026 single-verse pages
+        if verses_elements:
+            verse_text = verses_elements[0].get_text(" ", strip=True)
+            citation = f"{book_entry['book']} {chapter}:{verses}"
+            return {
+                "citation": citation,
+                "passage": verse_text
+            }
+    forget(url)  # a page we could not read must not be served from the cache all day
     return None
 
 def get_verse_url(book: str, chapter: str, verses: str, version: str):
@@ -572,11 +677,13 @@ def main(positional, book, chapter, verse, from_verse, to_verse, version, langua
 
     if not positional and not book:
         debug_log("Running in VOTD mode")
-        result = get_votd(language)
+        result = get_votd(language, version)
         if not result:
-            click.echo("No data received.")
-            return
-        if version:
+            click.echo("No data received.", err=True)
+            raise SystemExit(1)
+        if version and result.get("usfm"):  # already fetched in `version` via the api
+            result["citation"] = f"{result.get('citation','')} ({version.upper()})"
+        elif version:  # scraped page: site default version, re-fetch in `version`
             citation = result.get("citation", "")
             debug_log(f"Original citation: {citation}")
             m = re.match(r"^([\d\.\s]*[\w\s]+)\s+(\d+):(\d+)", citation)
