@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import copy
+import functools
 import os
 import json
 import re
@@ -11,6 +12,8 @@ from bs4 import BeautifulSoup
 import click
 from rich.console import Console
 from rich.panel import Panel
+from rich.table import Table
+from rich import box
 import locale
 import webbrowser
 import tempfile
@@ -70,7 +73,20 @@ def api_verse(version_id, usfm):
 def api_chapter(version_id, book_entry, chapter):
     """{'title', 'verses': {num: text}, 'citation'} of a whole chapter (same markup as the web page, parsed the same way)"""
     d = api("bible/chapter", id=version_id, reference=f"{book_entry['aliases'][0]}.{chapter}", format="html")
-    return parse_chapter_markup(BeautifulSoup(d["content"], "html.parser"), book_entry, chapter)
+    result = parse_chapter_markup(BeautifulSoup(d["content"], "html.parser"), book_entry, chapter)
+    if result and d.get("reference", {}).get("human"):
+        result["citation"] = d["reference"]["human"]  # in the version's language ("1. Korinther 13"), not the english book name
+    return result
+
+def localized_citation(version_id, book_entry, chapter, verses=None):
+    """'1. Korinther 13' / '1. Korinther 13:4-8' with the book name in the version's own language (from the cached version
+    metadata), the english name when that is unavailable. For the scraping fallback; api answers carry a human reference."""
+    name = book_entry["book"]
+    try:
+        name = next(b["human"] for b in api("bible/version", id=version_id)["books"] if b["usfm"] == book_entry["aliases"][0])
+    except Exception as e:
+        debug_log(f"No localized name for {book_entry['book']} in version {version_id}: {e}")
+    return f"{name} {chapter}" + (f":{verses}" if verses and verses != "-1" else "")
 
 
 DEBUG = False
@@ -80,14 +96,33 @@ def debug_log(msg: str):
     if DEBUG:
         click.echo(f"DEBUG: {msg}")
 
-def get_default_language():
-    loc = locale.getlocale()[0]
-    if loc:
-        lang = loc.split("_")[0].lower()
-        debug_log(f"System locale detected, using language: {lang}")
+def system_language():
+    """two-letter language of the system locale (de_CH -> de), en when none is set"""
+    try:
+        loc = locale.getlocale()[0]
+    except ValueError:
+        loc = None
+    loc = loc or next((os.environ[v] for v in ("LC_ALL", "LC_MESSAGES", "LANG") if os.environ.get(v)), None)
+    if loc and loc.upper() not in ("C", "POSIX"):
+        lang = re.split(r"[_.\-@]", loc)[0].lower()
+        debug_log(f"System locale {loc}, using language: {lang}")
         return lang
     debug_log("No locale found, defaulting to 'en'")
     return "en"
+
+def language_code(name):
+    """two-letter code for a language given as code, locale or name: de, de_CH, de-CH, german, Deutsch -> de"""
+    return re.split(r"[_.\-@]", locale.normalize(str(name).strip()))[0].lower()
+
+def default_language():
+    """`language: de` (or `locale: de_CH`) from the user config, else the system locale"""
+    config = load_user_config()
+    configured = config.get("language") or config.get("locale")
+    if configured:
+        lang = language_code(configured)
+        debug_log(f"User config sets language: {lang}")
+        return lang
+    return system_language()
 
 def load_defaults():
     try:
@@ -111,13 +146,17 @@ def load_translations():
         debug_log(f"Error loading translations database: {e}")
         return {}
 
-CONFIG_PATH = os.path.expanduser(os.path.join("~", ".config", "versli", "config.json"))
+CONFIG_PATH = os.path.expanduser(os.path.join("~", ".config", "verse", "verse.yaml"))
 
+@functools.cache
 def load_user_config():
-    """User-level defaults, e.g. {"version": "SLT"}."""
+    """user defaults from ~/.config/verse/verse.yaml: `version: SLT`, `language: de` (overrides the system locale)"""
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as cf:
-            config = json.load(cf)
+            import yaml
+            config = yaml.safe_load(cf) or {}
+        if not isinstance(config, dict):
+            raise ValueError("expected `key: value` settings")
         debug_log(f"User config loaded from {CONFIG_PATH}.")
         return config
     except FileNotFoundError:
@@ -127,22 +166,64 @@ def load_user_config():
         click.echo(f"Warning: could not read {CONFIG_PATH}: {e}", err=True)
         return {}
 
-def resolve_version_id(version: str):
+@functools.cache
+def load_versions():
+    """{abbreviation: bible.com id} from db/versions.json"""
     try:
-        versions_path = os.path.join(BASE_DIR, "db", "versions.json")
-        with open(versions_path, "r", encoding="utf-8") as vf:
-            versions_dict = json.load(vf)
+        with open(os.path.join(BASE_DIR, "db", "versions.json"), "r", encoding="utf-8") as vf:
+            versions = json.load(vf)
         debug_log("Versions database loaded.")
+        return versions
     except Exception as e:
         click.echo(f"Error loading versions database: {e}", err=True)
-        versions_dict = {}
+        return {}
 
+LANGUAGE_TAGS = {"en": "eng", "de": "deu", "fr": "fra", "es": "spa"}  # youversion lists versions per iso 639-3 language tag
+
+def version_key(name: str):
+    return re.sub(r"[\W_]", "", str(name).lower())
+
+@functools.cache
+def find_version(version: str, language: str = None):
+    """(abbreviation, bible.com id) of a version given by abbreviation ("SLT"), bible.com id ("157") or name
+    ("schlachter2000", "Hoffnung für alle"). Names are looked up in youversion's version list of `language`, then of
+    the other languages. Raises LookupError for an unknown or ambiguous version: never answer in another translation."""
+    version = str(version).strip()
     if version.isdigit():
-        return int(version)
-    for key, val in versions_dict.items():
-        if key.upper() == version.upper():
-            return val
-    return versions_dict.get("NIV", 111)
+        return version, int(version)
+    key = version_key(version)
+    for normalize in (str.upper, version_key):  # "NVIs" and "NVI-S" differ, so spelling as given first
+        for abbr, version_id in load_versions().items():
+            if normalize(abbr) == normalize(version):
+                return abbr, version_id
+    language = language or default_language()
+    hint = ""
+    for lang in dict.fromkeys([language, *LANGUAGE_TAGS]) if key else ():
+        if lang not in LANGUAGE_TAGS:
+            continue
+        try:
+            listed = api("bible/versions", language_tag=LANGUAGE_TAGS[lang], type="all")["versions"]
+        except Exception as e:
+            debug_log(f"No version list for '{lang}': {e}")
+            hint = hint or f" (could not look it up on bible.com: {e})"
+            continue
+        def names(v, *fields):
+            return {version_key(v.get(f) or "") for f in fields}
+        matches = ([v for v in listed if key in names(v, "abbreviation", "local_abbreviation", "title", "local_title")]
+                   or [v for v in listed if any(key in n for n in names(v, "title", "local_title"))])
+        if len(matches) == 1:
+            debug_log(f"Version '{version}' found by name: {matches[0]['local_abbreviation']} ({matches[0]['id']})")
+            return matches[0]["local_abbreviation"], matches[0]["id"]
+        if matches:
+            candidates = ", ".join(f"{v['local_abbreviation']} ({v['local_title']})" for v in matches[:8])
+            raise LookupError(f"Version '{version}' is ambiguous: {candidates}{', …' if len(matches) > 8 else ''}.")
+        if lang == language:
+            hint = f" Versions in '{lang}': {', '.join(v['local_abbreviation'] for v in listed)}."
+    raise LookupError(f"Unknown version '{version}'.{hint}")
+
+def resolve_version_id(version):
+    """bible.com id for an id, abbreviation or name (see find_version); LookupError when there is no such version"""
+    return version if isinstance(version, int) else find_version(version)[1]
 
 def load_versification():
     try:
@@ -159,7 +240,7 @@ def shift_verse(book: str, chapter: str, verse: str, version: str):
     vs = load_versification()
     if not vs or not verse:
         return verse
-    if resolve_version_id(version) not in {resolve_version_id(v) for v in vs.get("hebrew_psalm_numbering", [])}:
+    if resolve_version_id(version) not in {load_versions().get(v) for v in vs.get("hebrew_psalm_numbering", [])}:
         return verse
     entry, _ = resolve_book(book)
     if not entry or entry["aliases"][0].upper() != "PSA":
@@ -175,7 +256,7 @@ def normalize_book_key(name: str):
     return re.sub(r"[.\s]", "", name.lower())
 
 def load_book_index():
-    """Returns (book_entries, de_to_en_mapping, error_message)."""
+    """Returns (book_entries, {language: {english name: {"name", "abbr", "also"}}}, error_message)."""
     try:
         books_path = os.path.join(BASE_DIR, "db", "books.json")
         with open(books_path, "r", encoding="utf-8") as bf:
@@ -192,22 +273,37 @@ def load_book_index():
     except Exception as e:
         return None, None, f"Error loading book mappings: {e}"
 
-    return book_data.get("books", []), mappings.get("de_to_en", {}), None
+    return book_data.get("books", []), {lang: names for lang, names in mappings.items() if not lang.startswith("_")}, None
+
+def localized_books(language: str):
+    """[(entry, name, abbr)] for all 66 books with name and abbreviation in `language`;
+    english name and no abbreviation where the language has none. Returns ([], error_message) on error."""
+    entries, mappings, load_error = load_book_index()
+    if load_error:
+        return [], load_error
+    localized = mappings.get(language.lower(), {})
+    rows = []
+    for entry in entries:
+        local = localized.get(entry.get("book", ""), {})
+        rows.append((entry, local.get("name") or entry.get("book", ""), local.get("abbr")))
+    return rows, None
 
 def resolve_book(book: str):
     """Resolve a possibly abbreviated book name to its books.json entry.
 
-    Tries exact matches on English names, aliases and German names first,
-    then unique prefixes ("jes" -> "jesaja" -> Isaiah).
+    Tries exact matches on English names, usfm codes and every language's names, abbreviations
+    and alternative spellings first, then unique prefixes ("jes" -> "jesaja" -> Isaiah).
     Returns (book_entry, None) or (None, error_message)."""
-    entries, de_to_en, load_error = load_book_index()
+    entries, mappings, load_error = load_book_index()
     if load_error:
         return None, load_error
 
     indexed = []
     for entry in entries:
         names = {entry.get("book", "")} | set(entry.get("aliases", []))
-        names |= {de for de, en in de_to_en.items() if en.lower() == entry.get("book", "").lower()}
+        for localized in mappings.values():
+            local = localized.get(entry.get("book", ""), {})
+            names |= {local.get("name", ""), local.get("abbr", "")} | set(local.get("also", []))
         indexed.append((entry, {normalize_book_key(n) for n in names if n}))
 
     key = normalize_book_key(book)
@@ -226,11 +322,12 @@ def resolve_book(book: str):
     candidates = ", ".join(entry["book"] for entry in matches)
     return None, f"Book '{book}' is ambiguous: {candidates}."
 
-def get_votd(lang: str, version: str = None):
+def get_votd(lang: str, version: str = None, version_id: int = None):
     """verse of the day: youversion's day list (day of year -> usfm, english numbering) + the verse api in `version`.
     falls back to scraping the verse-of-the-day page (site default version) when the api fails."""
     if version:
         try:
+            version_id = version_id or resolve_version_id(version)
             data = api("moments/votd", day=1)  # the whole year
             def find(o):
                 if isinstance(o, dict):
@@ -242,8 +339,8 @@ def get_votd(lang: str, version: str = None):
                             return r
             usfm = {e["day"]: e["usfm"] for e in find(data)}[datetime.now().timetuple().tm_yday]
             book, chapter = usfm[0].split(".")[:2]
-            numbers = [shift_verse(book, chapter, u.split(".")[2], version) for u in usfm]
-            parts = [api_verse(resolve_version_id(version), f"{book}.{chapter}.{n}") for n in numbers]
+            numbers = [shift_verse(book, chapter, u.split(".")[2], version_id) for u in usfm]
+            parts = [api_verse(version_id, f"{book}.{chapter}.{n}") for n in numbers]
             citation = parts[0][0] + (f"-{numbers[-1]}" if len(parts) > 1 else "")
             debug_log(f"VOTD via api: {citation} ({version})")
             return {"citation": citation, "passage": " ".join(t for _, t in parts), "images": [], "version": version.upper(), "usfm": usfm}
@@ -396,7 +493,7 @@ def get_verse_api(book_entry, chapter, verses, version_id):
     texts = [chapter_result["verses"][n] for n in range(first, last + 1) if chapter_result and n in chapter_result["verses"]]
     if not texts:
         return None
-    return {"citation": f"{book_entry['book']} {chapter}:{verses}", "passage": " ".join(texts)}
+    return {"citation": f"{chapter_result['citation']}:{verses}", "passage": " ".join(texts)}
 
 def get_verse_html(book_entry, chapter, verses, version_id):
     """scrape www.bible.com (360KB per page, markup changes now and then): the fallback when the api is unavailable"""
@@ -451,7 +548,7 @@ def get_verse_html(book_entry, chapter, verses, version_id):
                         verse_text = content_div.get_text(" ", strip=True) if content_div else part_soup.get_text(" ", strip=True)
                         verse_list.append((i, verse_text))
                     verses_dict = {num: text for num, text in verse_list}
-                    citation = f"{book_entry['book']} {chapter}"
+                    citation = localized_citation(version_id, book_entry, chapter)
                     return {
                         "title": title_text,
                         "verses": verses_dict,
@@ -467,6 +564,8 @@ def get_verse_html(book_entry, chapter, verses, version_id):
                     "passage": verse_text,
                 }
     chapter_result = parse_chapter_markup(soup, book_entry, chapter)  # single-verse pages carry the whole chapter too
+    if chapter_result:
+        chapter_result["citation"] = localized_citation(version_id, book_entry, chapter)
     if verses == "-1":
         if chapter_result:
             return chapter_result
@@ -476,11 +575,11 @@ def get_verse_html(book_entry, chapter, verses, version_id):
             first, last = int(m.group(1)), int(m.group(2) or m.group(1))
             texts = [chapter_result["verses"][n] for n in range(first, last + 1) if n in chapter_result["verses"]]
             if texts:
-                return {"citation": f"{book_entry['book']} {chapter}:{verses}", "passage": " ".join(texts)}
+                return {"citation": localized_citation(version_id, book_entry, chapter, verses), "passage": " ".join(texts)}
         verses_elements = soup.select(".text-17")  # pre-2026 single-verse pages
         if verses_elements:
             verse_text = verses_elements[0].get_text(" ", strip=True)
-            citation = f"{book_entry['book']} {chapter}:{verses}"
+            citation = localized_citation(version_id, book_entry, chapter, verses)
             return {
                 "citation": citation,
                 "passage": verse_text
@@ -510,6 +609,29 @@ def format_markdown(result):
     passage = result.get("passage", "").strip()
     quoted = "\n".join(f"> {line}".rstrip() for line in passage.splitlines())
     return f"{quoted}\n>\n> — {result.get('citation', '').strip()}"
+
+def print_books(language: str, json_output: bool, markdown_output: bool):
+    """the 66 books with name and abbreviation in `language`: a table, --json, or a --markdown table"""
+    rows, load_error = localized_books(language)
+    if load_error:
+        click.echo(load_error, err=True)
+        raise SystemExit(1)
+    books = [{"book": entry["book"], "name": name, "abbreviation": abbr or entry["aliases"][0],
+              "code": entry["aliases"][0], "chapters": entry.get("chapters")} for entry, name, abbr in rows]
+    if json_output:
+        click.echo(json.dumps(books, indent=2, ensure_ascii=False))
+    elif markdown_output:
+        click.echo("| Book | Abbr. | Chapters |\n| --- | --- | ---: |")
+        for b in books:
+            click.echo(f"| {b['name']} | {b['abbreviation']} | {b['chapters']} |")
+    else:
+        table = Table(box=box.SIMPLE_HEAD, show_edge=False)
+        table.add_column("Book")
+        table.add_column("Abbr.", style="dim")
+        table.add_column("Chapters", justify="right")
+        for b in books:
+            table.add_row(b["name"], b["abbreviation"], str(b["chapters"]))
+        Console().print(table)
 
 CHAPTER_TOKEN_RE = re.compile(r"^(\d+)(?:,(\d+(?:-\d+)?))?$")
 GLUED_TOKEN_RE = re.compile(r"^(.*?[^\d,.\s])\.?\s*(\d+)(?:,(\d+(?:-\d+)?))?$")
@@ -555,7 +677,7 @@ def parse_positional(positional):
 def _default_version():
     user_config = load_user_config()
     return (user_config.get("version") or user_config.get("translation")
-            or load_defaults().get(get_default_language().lower(), "NIV"))
+            or load_defaults().get(default_language(), "NIV"))
 
 def _verse_numbers(book_entry, chapter):
     """Verse numbers of a chapter, fetched via the (cached) chapter page."""
@@ -578,7 +700,7 @@ def complete_reference(ctx, param, incomplete):
 
 def _complete_reference(ctx, incomplete, CompletionItem):
     prior = [t.strip() for t in (ctx.params.get("positional") or ()) if t.strip()]
-    entries, de_to_en, load_error = load_book_index()
+    books, load_error = localized_books(language_code(ctx.params.get("language") or default_language()))
     if load_error:
         return []
 
@@ -611,13 +733,13 @@ def _complete_reference(ctx, incomplete, CompletionItem):
             return [CompletionItem(str(n)) for n in range(1, int(book_entry.get("chapters", 0)) + 1)
                     if str(n).startswith(incomplete)]
 
-    # book stage: German names first, then English; multi-word books complete token-wise
+    # book stage: names and abbreviations in the user's language (english where it has none) with the
+    # english name as description; multi-word books ("1. Mose") complete token-wise
     items, seen = [], set()
-    for entry in entries:
+    for entry, name, abbr in books:
         en = entry.get("book", "")
-        names = [de for de, e in de_to_en.items() if e.lower() == en.lower()] + [en]
-        for name in names:
-            name_tokens = name.split()
+        for spelling in (name, abbr) if abbr else (name,):
+            name_tokens = spelling.split()
             if len(name_tokens) <= len(prior):
                 continue
             if [t.lower() for t in name_tokens[:len(prior)]] != [t.lower() for t in prior]:
@@ -626,7 +748,7 @@ def _complete_reference(ctx, incomplete, CompletionItem):
             if not candidate.lower().startswith(incomplete.lower()) or candidate.lower() in seen:
                 continue
             seen.add(candidate.lower())
-            items.append(CompletionItem(candidate, help=en if candidate.lower() != en.lower() else None))
+            items.append(CompletionItem(candidate, help=en if spelling.lower() != en.lower() else None))
 
     # glued "<book><chapter>" being typed (e.g. "jes5") -> complete glued chapters
     if not prior:
@@ -646,15 +768,16 @@ def _complete_reference(ctx, incomplete, CompletionItem):
 @click.option("--verse", help="Verse number (single verse)")
 @click.option("--from", "from_verse", type=int, help="Start verse for range")
 @click.option("--to", "to_verse", type=int, help="End verse for range")
-@click.option("--version", help="Bible version (e.g., NIV, KJV, bibel.heute)")
-@click.option("--language", default=get_default_language(), help="Language code (default: system locale)")
+@click.option("--version", help="Bible version: abbreviation, name or bible.com id (e.g., NIV, bibel.heute, schlachter2000, 157)")
+@click.option("--language", help="Language code or name (de, german) for book names and defaults (default: ~/.config/verse/verse.yaml, else the system locale)")
+@click.option("--books", "list_books", is_flag=True, default=False, help="List the books of the bible with their names and abbreviations in your language")
 @click.option("--json", "json_output", is_flag=True, default=False, help="Output JSON")
 @click.option("--markdown", "markdown_output", is_flag=True, default=False, help="Output Markdown")
 @click.option("--pretty", is_flag=True, default=True, help="Pretty output (default)")
 @click.option("-v", "--verbose", is_flag=True, default=False, help="Verbose debug output")
 @click.option("--clear-cache", is_flag=True, default=False, help="Clear the request cache before running")
 @click.option("--web", is_flag=True, default=False, help="Show verse in the browser")
-def main(positional, book, chapter, verse, from_verse, to_verse, version, language, json_output, markdown_output, pretty, verbose, clear_cache, web):
+def main(positional, book, chapter, verse, from_verse, to_verse, version, language, list_books, json_output, markdown_output, pretty, verbose, clear_cache, web):
     global DEBUG
     DEBUG = verbose
     debug_log("Starting script...")
@@ -663,6 +786,14 @@ def main(positional, book, chapter, verse, from_verse, to_verse, version, langua
         debug_log("Clearing request cache...")
         requests_cache.clear()
         debug_log("Cache cleared.")
+
+    language = language_code(language) if language else default_language()
+    if not re.fullmatch(r"[a-z]{2,3}", language):
+        click.echo(f"Unknown language '{language}': give a code or name like de, en, fr, es, german.", err=True)
+        raise SystemExit(1)
+    if list_books:
+        print_books(language, json_output, markdown_output)
+        return
 
     defaults = load_defaults()
     translations = load_translations()
@@ -674,10 +805,15 @@ def main(positional, book, chapter, verse, from_verse, to_verse, version, langua
     if not version:
         version = defaults.get(language.lower(), "NIV")
         debug_log(f"No version specified, using default for '{language}': {version}")
+    try:
+        version, version_id = find_version(version, language)  # "schlachter2000" -> ("SCH2000", 157)
+    except LookupError as e:
+        click.echo(e, err=True)
+        raise SystemExit(1)
 
     if not positional and not book:
         debug_log("Running in VOTD mode")
-        result = get_votd(language, version)
+        result = get_votd(language, version, version_id)
         if not result:
             click.echo("No data received.", err=True)
             raise SystemExit(1)
@@ -690,9 +826,9 @@ def main(positional, book, chapter, verse, from_verse, to_verse, version, langua
             if m:
                 book_name = m.group(1).strip()
                 chap = m.group(2)
-                ver_num = shift_verse(book_name, chap, m.group(3), version)
+                ver_num = shift_verse(book_name, chap, m.group(3), version_id)
                 debug_log(f"Re-fetching verse for {book_name} {chap}:{ver_num} in version {version}")
-                new_result = get_verse(book_name, chap, ver_num, version)
+                new_result = get_verse(book_name, chap, ver_num, version_id)
                 if new_result and new_result.get("passage"):
                     result = new_result
                     result["citation"] = f"{result.get('citation','')} ({version.upper()})"
@@ -718,7 +854,7 @@ def main(positional, book, chapter, verse, from_verse, to_verse, version, langua
             if not verse and from_verse is not None and to_verse is not None:
                 verse = "-1"
         debug_log(f"Fetching verse for {book_name} {chapter}:{verse} in version {version}")
-        result = get_verse(book_name, chapter, verse, version)
+        result = get_verse(book_name, chapter, verse, version_id)
         if not result:
             click.echo("No data received.", err=True)
             raise SystemExit(1)
@@ -756,7 +892,7 @@ def main(positional, book, chapter, verse, from_verse, to_verse, version, langua
                 click.echo("Chapter number is required for --web option.", err=True)
                 return
             verse_param = verse if verse else "-1"
-            url = get_verse_url(book_name, chapter, verse_param, version)
+            url = get_verse_url(book_name, chapter, verse_param, version_id)
             if not url:
                 click.echo("Could not construct URL for the verse.", err=True)
                 return
